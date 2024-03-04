@@ -17,11 +17,19 @@ def text_to_sequence(text, cleaner_names):
     """
     sequence = []
 
-    clean_text = _clean_text(text, cleaner_names)
-    for symbol in clean_text:
-        symbol_id = _symbol_to_id[symbol]
-        sequence += [symbol_id]
-    return sequence
+    clean_text, starts_with = _clean_text(text, cleaner_names)
+    space_id = _symbol_to_id[" "]
+    for i, phoneme_phrase in enumerate(clean_text):
+        phrase_seq = []
+        for symbol in phoneme_phrase:
+            symbol_id = _symbol_to_id[symbol]
+            phrase_seq += [symbol_id]
+        
+        if i != len(clean_text)-1:
+            phrase_seq += [space_id]
+        sequence.append(phrase_seq)
+    
+    return sequence, starts_with
 
 
 def cleaned_text_to_sequence(cleaned_text):
@@ -49,5 +57,5 @@ def _clean_text(text, cleaner_names):
         cleaner = getattr(cleaners, name)
         if not cleaner:
             raise Exception("Unknown cleaner: %s" % name)
-        text = cleaner(text)
-    return text
+        text, starts_with = cleaner(text)
+    return text, starts_with

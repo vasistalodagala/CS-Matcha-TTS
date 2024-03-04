@@ -17,6 +17,11 @@ from matcha.models.matcha_tts import MatchaTTS
 from matcha.text import sequence_to_text, text_to_sequence
 from matcha.utils.utils import assert_model_downloaded, get_user_data_dir, intersperse
 
+from matcha.text.symbols import symbols
+
+# Mappings from symbol to numeric ID and vice versa:
+_id_to_symbol = {i: s for i, s in enumerate(symbols)}
+
 MATCHA_URLS = {
     "matcha_ljspeech": "https://github.com/shivammehta25/Matcha-TTS-checkpoints/releases/download/v1.0/matcha_ljspeech.ckpt",
     "matcha_vctk": "https://github.com/shivammehta25/Matcha-TTS-checkpoints/releases/download/v1.0/matcha_vctk.ckpt",
@@ -45,16 +50,63 @@ def plot_spectrogram_to_numpy(spectrogram, filename):
     plt.savefig(filename)
 
 
-def process_text(i: int, text: str, device: torch.device):
+def process_text(i: int, text: str, device: torch.device, language):
     print(f"[{i}] - Input text: {text}")
-    x = torch.tensor(
-        intersperse(text_to_sequence(text, ["english_cleaners2"]), 0),
-        dtype=torch.long,
-        device=device,
-    )[None]
+    if language == 'english':
+        norm_seq, _ = text_to_sequence(text, ["english_cleaners2"])
+        x = torch.tensor(
+            intersperse(norm_seq[0], 0),
+            dtype=torch.long,
+            device=device,
+        )[None]
+    elif language == 'arabic':
+        norm_seq, _ = text_to_sequence(text, ["arabic_cleaners"])
+        x = torch.tensor(
+            intersperse(norm_seq[0], 0),
+            dtype=torch.long,
+            device=device,
+        )[None]
+    elif language == 'code_mixed':
+        norm_seq, starts_with = text_to_sequence(text, ["cs_eng_ara_cleaners"])
+        if starts_with is None:
+            x = torch.tensor(
+                intersperse(norm_seq[0], 0),
+                dtype=torch.long,
+                device=device,
+            )[None]
+        else:
+            text_norm = []
+            if starts_with == "en":
+                for i, ns in enumerate(norm_seq):
+                    if i%2 == 0:
+                        text_norm += intersperse(ns, 0)
+                    else:
+                        text_norm += intersperse(ns, 1)
+            else:
+                for i, ns in enumerate(norm_seq):
+                    if i%2 == 0:
+                        text_norm += intersperse(ns, 1)
+                    else:
+                        text_norm += intersperse(ns, 0)
+            
+            x = torch.tensor(
+                text_norm,
+                dtype=torch.long,
+                device=device,
+            )[None]
+
     x_lengths = torch.tensor([x.shape[-1]], dtype=torch.long, device=device)
-    x_phones = sequence_to_text(x.squeeze(0).tolist())
-    print(f"[{i}] - Phonetised text: {x_phones[1::2]}")
+    if language != 'code_mixed':
+        x_phones = sequence_to_text(x.squeeze(0).tolist())
+        x_phones = x_phones[1::2]
+    else:
+        pad = _id_to_symbol[0]
+        additional_pad = _id_to_symbol[1]
+        x_phones = sequence_to_text(x.squeeze(0).tolist())
+        x_phones = x_phones.replace(pad, '')
+        x_phones = x_phones.replace(additional_pad, '')
+
+    print(f"[{i}] - Phonetised text: {x_phones}")
 
     return {"x_orig": text, "x": x, "x_lengths": x_lengths, "x_phones": x_phones}
 
@@ -76,8 +128,12 @@ def assert_required_models_available(args):
         model_path = save_dir / f"{args.model}.ckpt"
         assert_model_downloaded(model_path, MATCHA_URLS[args.model])
 
-    vocoder_path = save_dir / f"{args.vocoder}"
-    assert_model_downloaded(vocoder_path, VOCODER_URLS[args.vocoder])
+    if args.custom_vocoder_path == "":
+        vocoder_path = save_dir / f"{args.vocoder}"
+        assert_model_downloaded(vocoder_path, VOCODER_URLS[args.vocoder])
+    else:
+        vocoder_path = args.custom_vocoder_path
+    
     return {"matcha": model_path, "vocoder": vocoder_path}
 
 
@@ -114,10 +170,10 @@ def load_matcha(model_name, checkpoint_path, device):
     return model
 
 
-def to_waveform(mel, vocoder, denoiser=None):
+def to_waveform(mel, vocoder, args, denoiser=None):
     audio = vocoder(mel).clamp(-1, 1)
     if denoiser is not None:
-        audio = denoiser(audio.squeeze(), strength=0.00025).cpu().squeeze()
+        audio = denoiser(audio.squeeze(), strength=args.denoiser_strength).cpu().squeeze()
 
     return audio.cpu().squeeze()
 
@@ -125,8 +181,8 @@ def to_waveform(mel, vocoder, denoiser=None):
 def save_to_folder(filename: str, output: dict, folder: str):
     folder = Path(folder)
     folder.mkdir(exist_ok=True, parents=True)
-    plot_spectrogram_to_numpy(np.array(output["mel"].squeeze().float().cpu()), f"{filename}.png")
-    np.save(folder / f"{filename}", output["mel"].cpu().numpy())
+    # plot_spectrogram_to_numpy(np.array(output["mel"].squeeze().float().cpu()), f"{filename}.png")
+    # np.save(folder / f"{filename}", output["mel"].cpu().numpy())
     sf.write(folder / f"{filename}.wav", output["waveform"], 22050, "PCM_24")
     return folder.resolve() / f"{filename}.wav"
 
@@ -223,13 +279,26 @@ def cli():
         default=None,
         help="Path to the custom model checkpoint",
     )
+    parser.add_argument(
+        "--language",
+        type=str,
+        default="english",
+        help="Name of the language in which the text is being passed",
+    )
 
     parser.add_argument(
         "--vocoder",
         type=str,
-        default=None,
+        default="hifigan_T2_v1",
         help="Vocoder to use (default: will use the one suggested with the pretrained model))",
         choices=VOCODER_URLS.keys(),
+    )
+    parser.add_argument(
+        "--custom_vocoder_path",
+        type=str,
+        default="",
+        required=False,
+        help="Path to a custom hifigan vocoder if any",
     )
     parser.add_argument("--text", type=str, default=None, help="Text to synthesize")
     parser.add_argument("--file", type=str, default=None, help="Text file to synthesize")
@@ -260,6 +329,13 @@ def cli():
         default=os.getcwd(),
         help="Output folder to save results (default: current dir)",
     )
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        default="",
+        required=False,
+        help="Name of the output file, when synthesizing a single text utterance. If not provided, utterance_001.wav would be used.",
+    )
     parser.add_argument("--batched", action="store_true", help="Batched inference (default: False)")
     parser.add_argument(
         "--batch_size", type=int, default=32, help="Batch size only useful when --batched (default: 32)"
@@ -282,11 +358,16 @@ def cli():
 
     texts = get_texts(args)
 
+    start_t = dt.datetime.now()
+
     spk = torch.tensor([args.spk], device=device, dtype=torch.long) if args.spk is not None else None
     if len(texts) == 1 or not args.batched:
         unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk)
     else:
         batched_synthesis(args, device, model, vocoder, denoiser, texts, spk)
+    
+    t = (dt.datetime.now() - start_t).total_seconds()
+    print(f"Total time taken on this job = {t} seconds")
 
 
 class BatchedSynthesisDataset(torch.utils.data.Dataset):
@@ -316,7 +397,7 @@ def batched_collate_fn(batch):
 def batched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
     total_rtf = []
     total_rtf_w = []
-    processed_text = [process_text(i, text, "cpu") for i, text in enumerate(texts)]
+    processed_text = [process_text(i, text, "cpu", args.language) for i, text in enumerate(texts)]
     dataloader = torch.utils.data.DataLoader(
         BatchedSynthesisDataset(processed_text),
         batch_size=args.batch_size,
@@ -335,7 +416,7 @@ def batched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
             length_scale=args.speaking_rate,
         )
 
-        output["waveform"] = to_waveform(output["mel"], vocoder, denoiser)
+        output["waveform"] = to_waveform(output["mel"], vocoder, args, denoiser)
         t = (dt.datetime.now() - start_t).total_seconds()
         rtf_w = t * 22050 / (output["waveform"].shape[-1])
         print(f"[🍵-Batch: {i}] Matcha-TTS RTF: {output['rtf']:.4f}")
@@ -360,11 +441,14 @@ def unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
     total_rtf_w = []
     for i, text in enumerate(texts):
         i = i + 1
-        base_name = f"utterance_{i:03d}_speaker_{args.spk:03d}" if args.spk is not None else f"utterance_{i:03d}"
+        if args.output_file is not None and args.text is not None and len(texts)==1:
+            base_name = args.output_file
+        else:
+            base_name = f"utterance_{i:03d}_speaker_{args.spk:03d}" if args.spk is not None else f"utterance_{i:03d}"
 
         print("".join(["="] * 100))
         text = text.strip()
-        text_processed = process_text(i, text, device)
+        text_processed = process_text(i, text, device, args.language)
 
         print(f"[🍵] Whisking Matcha-T(ea)TS for: {i}")
         start_t = dt.datetime.now()
@@ -376,7 +460,7 @@ def unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
             spks=spk,
             length_scale=args.speaking_rate,
         )
-        output["waveform"] = to_waveform(output["mel"], vocoder, denoiser)
+        output["waveform"] = to_waveform(output["mel"], vocoder, args, denoiser)
         # RTF with HiFiGAN
         t = (dt.datetime.now() - start_t).total_seconds()
         rtf_w = t * 22050 / (output["waveform"].shape[-1])

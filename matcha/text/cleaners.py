@@ -33,6 +33,17 @@ global_phonemizer = phonemizer.backend.EspeakBackend(
     logger=critical_logger,
 )
 
+arabic_phonemizer = phonemizer.backend.EspeakBackend(
+    language="ar",
+    preserve_punctuation=True,
+    with_stress=True,
+    language_switch="remove-flags",
+    logger=critical_logger,
+)
+
+additional_language_utf8_ranges = {
+    'arabic': [u'\u0600', u'\u06ff']
+}
 
 # Regular expression matching whitespace:
 _whitespace_re = re.compile(r"\s+")
@@ -85,7 +96,7 @@ def basic_cleaners(text):
     """Basic pipeline that lowercases and collapses whitespace without transliteration."""
     text = lowercase(text)
     text = collapse_whitespace(text)
-    return text
+    return [text], None
 
 
 def transliteration_cleaners(text):
@@ -93,7 +104,7 @@ def transliteration_cleaners(text):
     text = convert_to_ascii(text)
     text = lowercase(text)
     text = collapse_whitespace(text)
-    return text
+    return [text], None
 
 
 def english_cleaners2(text):
@@ -103,7 +114,7 @@ def english_cleaners2(text):
     text = expand_abbreviations(text)
     phonemes = global_phonemizer.phonemize([text], strip=True, njobs=1)[0]
     phonemes = collapse_whitespace(phonemes)
-    return phonemes
+    return [phonemes], None
 
 
 def english_cleaners_piper(text):
@@ -113,4 +124,119 @@ def english_cleaners_piper(text):
     text = expand_abbreviations(text)
     phonemes = "".join(piper_phonemize.phonemize_espeak(text=text, voice="en-US")[0])
     phonemes = collapse_whitespace(phonemes)
-    return phonemes
+    return [phonemes], None
+
+
+def arabic_cleaners(text):
+    """Pipeline for Arabic text, including abbreviation expansion. + punctuation + stress"""
+    phonemes = arabic_phonemizer.phonemize([text], strip=True, njobs=1)[0]
+    phonemes = collapse_whitespace(phonemes)
+    return [phonemes], None
+
+
+def arabic_cleaners_piper(text):
+    """Pipeline for Arabic text, including abbreviation expansion. + punctuation + stress"""
+    phonemes = "".join(piper_phonemize.phonemize_espeak(text=text, voice="ar")[0])
+    phonemes = collapse_whitespace(phonemes)
+    return [phonemes], None
+
+
+def get_utf8_range(c):
+    for lang in additional_language_utf8_ranges.keys():
+        range_check = additional_language_utf8_ranges[lang][0] <= c <= additional_language_utf8_ranges[lang][1]
+        if range_check:
+            break
+    return int(range_check)
+
+
+def get_cs_list(text):
+    cs_seq_list = []
+    if len(text.split()) == 1:
+        cs_seq_list.append(text)
+    else:
+        cs_seq_list.append(text.split()[0])
+        for word in text.split()[1:]:
+            if get_utf8_range(word[0]) == get_utf8_range(cs_seq_list[-1][0]):
+                cs_seq_list[-1] += ' ' + word
+            else:
+                cs_seq_list.append(word)
+    return cs_seq_list
+
+
+def cs_eng_ara_cleaners(text):
+    """Pipeline for text to handle English and Arabic, including abbreviation expansion. + punctuation + stress"""
+    phonemes = []
+    cs_seq_list = get_cs_list(text)
+    if get_utf8_range(cs_seq_list[0][0]) == 1:
+        for i, phrase in enumerate(cs_seq_list):
+            if i%2 == 0:
+                ar_phoneme = arabic_phonemizer.phonemize([phrase], strip=True, njobs=1)[0]
+                ar_phoneme = collapse_whitespace(ar_phoneme)
+                ar_phoneme.strip()
+                phonemes.append(ar_phoneme)
+            else:
+                phrase = convert_to_ascii(phrase)
+                phrase = lowercase(phrase)
+                phrase = expand_abbreviations(phrase)
+                en_phoneme = global_phonemizer.phonemize([phrase], strip=True, njobs=1)[0]
+                en_phoneme = collapse_whitespace(en_phoneme)
+                en_phoneme.strip()
+                phonemes.append(en_phoneme)
+        return phonemes, "ar"
+    
+    else:
+        for i, phrase in enumerate(cs_seq_list):
+            if i%2 == 0:
+                phrase = convert_to_ascii(phrase)
+                phrase = lowercase(phrase)
+                phrase = expand_abbreviations(phrase)
+                en_phoneme = global_phonemizer.phonemize([phrase], strip=True, njobs=1)[0]
+                en_phoneme = collapse_whitespace(en_phoneme)
+                en_phoneme.strip()
+                phonemes.append(en_phoneme) 
+            else:
+                ar_phoneme = arabic_phonemizer.phonemize([phrase], strip=True, njobs=1)[0]
+                ar_phoneme = collapse_whitespace(ar_phoneme)
+                ar_phoneme.strip()
+                phonemes.append(ar_phoneme)
+        return  phonemes, "en"
+
+
+def cs_eng_ara_cleaners_piper(text):
+    """Pipeline for text to handle English and Arabic, including abbreviation expansion. + punctuation + stress"""
+    phonemes = []
+    cs_seq_list = get_cs_list(text)
+    if get_utf8_range(cs_seq_list[0][0]) == 1:
+        for i, phrase in enumerate(cs_seq_list):
+            if i%2 == 0:
+                ar_phoneme = "".join(piper_phonemize.phonemize_espeak(text=phrase, voice="ar")[0])
+                ar_phoneme = collapse_whitespace(ar_phoneme)
+                ar_phoneme.strip()
+                phonemes.append(ar_phoneme)
+            else:
+                phrase = convert_to_ascii(phrase)
+                phrase = lowercase(phrase)
+                phrase = expand_abbreviations(phrase)
+                en_phoneme = "".join(piper_phonemize.phonemize_espeak(text=phrase, voice="en-US")[0])
+                en_phoneme = collapse_whitespace(en_phoneme)
+                en_phoneme.strip()
+                phonemes.append(en_phoneme)
+        return phonemes, "ar"
+    
+    else:
+        for i, phrase in enumerate(cs_seq_list):
+            if i%2 == 0:
+                phrase = convert_to_ascii(phrase)
+                phrase = lowercase(phrase)
+                phrase = expand_abbreviations(phrase)
+                en_phoneme = "".join(piper_phonemize.phonemize_espeak(text=phrase, voice="en-US")[0])
+                en_phoneme = collapse_whitespace(en_phoneme)
+                en_phoneme.strip()
+                phonemes.append(en_phoneme) 
+            else:
+                ar_phoneme = "".join(piper_phonemize.phonemize_espeak(text=phrase, voice="ar")[0])
+                ar_phoneme = collapse_whitespace(ar_phoneme)
+                ar_phoneme.strip()
+                phonemes.append(ar_phoneme)
+        return phonemes, "en"
+

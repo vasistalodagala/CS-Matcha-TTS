@@ -187,9 +187,24 @@ class TextMelDataset(torch.utils.data.Dataset):
         return mel
 
     def get_text(self, text, add_blank=True):
-        text_norm = text_to_sequence(text, self.cleaners)
+        norm_seq, starts_with = text_to_sequence(text, self.cleaners)
         if self.add_blank:
-            text_norm = intersperse(text_norm, 0)
+            if starts_with is None:
+                text_norm = intersperse(norm_seq[0], 0)
+            else:
+                text_norm = []
+                if starts_with == "en":
+                    for i, ns in enumerate(norm_seq):
+                        if i%2 == 0:
+                            text_norm += intersperse(ns, 0)
+                        else:
+                            text_norm += intersperse(ns, 1)
+                else:
+                    for i, ns in enumerate(norm_seq):
+                        if i%2 == 0:
+                            text_norm += intersperse(ns, 1)
+                        else:
+                            text_norm += intersperse(ns, 0)
         text_norm = torch.IntTensor(text_norm)
         return text_norm
 
